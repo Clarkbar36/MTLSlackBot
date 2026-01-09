@@ -1,5 +1,5 @@
-import sqlite3
 import os
+import psycopg2
 from datetime import datetime
 import json
 from slack_sdk import WebClient
@@ -23,10 +23,19 @@ def send_slack_message(channel_id, blocks_msg):
 
 
 def get_tasks():
-    database_file = 'MTLmaintenance.db'
-    conn = sqlite3.connect(database_file)
+    database_url = os.getenv('DATABASE_URL')
+    conn = psycopg2.connect(database_url)
     cursor = conn.cursor()
-    query = f"SELECT Task FROM MonthlySchedule WHERE MonthNum = strftime('%m', 'now');"
+    query = """SELECT "Task"
+            FROM "MonthlySchedule" ms
+            WHERE "MonthNum" = EXTRACT(MONTH FROM CURRENT_DATE)
+            AND NOT EXISTS (
+                SELECT 1
+                FROM "TaskLog" tl
+                WHERE tl."TaskId" = ms."Id"
+                  AND EXTRACT(MONTH FROM tl."CompletionDate") = EXTRACT(MONTH FROM CURRENT_DATE)
+                  AND EXTRACT(YEAR FROM tl."CompletionDate") = EXTRACT(YEAR FROM CURRENT_DATE)
+            );"""
     cursor.execute(query)
     results = cursor.fetchall()
     conn.close()
@@ -42,7 +51,7 @@ def generate_slack_blocks(data, header):
         "type": "header",
         "text": {
             "type": "plain_text",
-            "text": f"{header} Maintenance Tasks"
+            "text": f"Current {header} Maintenance Tasks"
         }
     }, {"type": "divider"}]
 
@@ -57,20 +66,40 @@ def generate_slack_blocks(data, header):
         })
         blocks.append({"type": "divider"})
 
+    # Footer link
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": "To update tasks, please visit <https://mcl-maintain.up.railway.app/|this page>."
+        }
+    })
+
     return blocks
 
 
-def lambda_handler(event, context):
-    # Query for month's tasks
+def is_first_or_third_saturday():
+    today = datetime.now()
+    if today.weekday() != 5:  # 5 = Saturday
+        return False
+    day = today.day
+    # First Saturday: day 1-7, Third Saturday: day 15-21
+    return day <= 7 or (15 <= day <= 21)
+
+
+def main():
+    if not is_first_or_third_saturday():
+        print("Not the 1st or 3rd Saturday. Skipping.")
+        return
+
     tasks = get_tasks()
+    if not tasks:
+        print("No pending tasks for this month.")
+        return
 
-    # Generate Slack message blocks
     slack_blocks = generate_slack_blocks(tasks, datetime.now().strftime("%B"))
+    send_slack_message("C01EUJYV2JV", slack_blocks)
 
-    # Send the message to Slack
-    send_slack_message("C01EUJYV2JV", slack_blocks)  # maintenance -  C06A231G3E3
 
-    return {
-        "statusCode": 200,
-        "body": json.dumps("Message sent successfully")
-    }
+if __name__ == "__main__":
+    main()
