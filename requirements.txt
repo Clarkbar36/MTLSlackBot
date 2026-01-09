@@ -1,0 +1,2 @@
+psycopg2-binary>=2.9.11
+slack_sdk>=3.21.0
